@@ -1,0 +1,505 @@
+<!doctype html>
+<!--
+  ESP32-S3 Servo Controller Web UI - Logan Smith [22020998]
+  --------------------------------
+  Browser-based control panel for an ESP32-S3 running a BLE servo controller.
+  Supports:
+  - Manual joint control (sliders + jog buttons)
+  - Teach & playback (forward / reverse)
+  - Safe ARM / DISARM workflow
+  - Command queueing to avoid BLE congestion
+-->
+
+<meta charset="utf-8" />
+<title>ESP32S3 Servo Controller (Teach + Reverse)</title>
+
+<!-- Ensure proper scaling on mobile devices -->
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<style>
+  /* ---------- Global layout & theme ---------- */
+  body{
+    margin:0;
+    font:14px system-ui;
+    background:#0f1115;
+    color:#e6e6e6
+  }
+
+  /* Top status bar */
+  header{
+    padding:12px 16px;
+    border-bottom:1px solid #232838;
+    display:flex;
+    gap:10px;
+    align-items:center
+  }
+
+  /* Main two-column layout */
+  .wrap{
+    display:grid;
+    grid-template-columns:360px 1fr;
+    gap:16px;
+    padding:16px
+  }
+
+  /* Card-like panels */
+  .panel{
+    background:#161a22;
+    border:1px solid #232838;
+    border-radius:10px;
+    padding:12px
+  }
+
+  .row{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+    margin:8px 0
+  }
+
+  /* Generic button styling */
+  .btn{
+    padding:8px 12px;
+    border-radius:8px;
+    background:#1e2430;
+    color:#e6e6e6;
+    border:1px solid #232838;
+    cursor:pointer
+  }
+
+  .btn:hover{ background:#222a3a }
+
+  /* Grid used for joint cards */
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:10px
+  }
+
+  .card{
+    border:1px solid #232838;
+    border-radius:10px;
+    padding:10px
+  }
+
+  .card h3{
+    margin:0 0 8px 0;
+    font-size:14px;
+    color:#a8b0bf
+  }
+
+  /* Scrollable log output */
+  #log{
+    height:220px;
+    overflow:auto;
+    font:12px ui-monospace;
+    background:#0b0e13;
+    padding:8px;
+    border:1px solid #232838;
+    border-radius:8px;
+    white-space:pre-wrap
+  }
+
+  input[type=range]{ width:100% }
+
+  /* Status colours */
+  .warn{ color:#fbbf24 }
+  .danger{ color:#ff6b6b; font-weight:700 }
+
+  /* Small status indicator pills */
+  .pill{
+    padding:2px 8px;
+    border:1px solid #232838;
+    border-radius:999px;
+    background:#0b0e13
+  }
+</style>
+
+<header>
+  <!-- Connection + arm state indicators -->
+  <strong>ESP32S3 Servo Controller</strong>
+  <span class="pill" id="state">Disconnected</span>
+  <span class="pill warn" id="armedState">DISARMED</span>
+</header>
+
+<div class="wrap">
+  <!-- ================= LEFT CONTROL PANEL ================= -->
+  <div class="panel">
+
+    <!-- Connection controls -->
+    <div class="row">
+      <button id="btnConnect" class="btn">Connect</button>
+      <button id="btnDisconnect" class="btn">Disconnect</button>
+      <button id="btnHelp" class="btn">Help</button>
+    </div>
+
+    <!-- Safety-critical controls -->
+    <div class="row">
+      <button id="btnArm" class="btn">ARM</button>
+      <button id="btnDisarm" class="btn warn">DISARM</button>
+      <button id="btnAbort" class="btn danger">ABORT</button>
+      <button id="btnCenter" class="btn">Center All</button>
+    </div>
+
+    <!-- Teach & playback controls -->
+    <div class="card">
+      <h3>Teach</h3>
+      <div class="row">
+        <button id="btnRec" class="btn">Record</button>
+        <button id="btnRecStop" class="btn warn">Stop</button>
+      </div>
+      <div class="row">
+        <button id="btnPlayF" class="btn">Play Forward</button>
+        <button id="btnPlayR" class="btn">Play Reverse</button>
+      </div>
+      <div class="row">
+        <label>Record interval (ms)</label>
+        <input id="recInt" type="number" min="50" max="1000" step="10" value="150">
+        <button id="btnRecInt" class="btn">Set</button>
+      </div>
+    </div>
+
+    <!-- Motion tuning -->
+    <div class="card">
+      <h3>Motion</h3>
+
+      <!-- Servo speed -->
+      <div class="row">
+        <label>Speed (µs/s)</label>
+        <input id="speed" type="range" min="50" max="2000" value="300">
+        <span id="speedVal">300</span>
+        <button id="btnSpeed" class="btn">Set</button>
+      </div>
+
+      <!-- Jog size -->
+      <div class="row">
+        <label>Jog step (deg)</label>
+        <input id="jogdeg" type="range" min="1" max="20" value="3">
+        <span id="jogVal">3</span>
+        <button id="btnJog" class="btn">Set</button>
+      </div>
+
+      <!-- Slider debounce rate -->
+      <div class="row">
+        <label>Slider rate (ms)</label>
+        <input id="rate" type="range" min="80" max="600" value="160">
+        <span id="rateVal">160</span>
+      </div>
+    </div>
+
+    <!-- Utility actions -->
+    <div class="row">
+      <button id="btnStatus" class="btn">STATUS</button>
+      <button id="btnExport" class="btn">EXPORT</button>
+      <button id="btnClearLog" class="btn">Clear Log</button>
+    </div>
+  </div>
+
+  <!-- ================= RIGHT PANEL: JOINTS + LOG ================= -->
+  <div class="panel">
+    <!-- Joint cards dynamically inserted here -->
+    <div id="joints" class="grid"></div>
+
+    <!-- Serial-style log output -->
+    <div style="margin-top:12px">
+      <div class="row"><label>Log</label></div>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+  Web Bluetooth controller logic
+  ------------------------------
+  Design goals:
+  - Never overlap GATT writes (BLE will throw errors)
+  - Avoid flooding BLE when sliders move rapidly
+  - Always prioritise safety and state synchronisation
+*/
+
+const SERVICE_UUID = '12345678-1234-1234-1234-123456789abc';
+const RX_UUID      = '12345678-1234-1234-1234-123456789abd';
+const TX_UUID      = '12345678-1234-1234-1234-123456789abe';
+
+/* Human-readable joint names */
+const JOINTS = ['Base','Shoulder','Elbow','Second Elbow','Wrist Rot','Gripper'];
+
+/* BLE handles & state flags */
+let device, server, service, rxChar, txChar;
+let connecting = false;
+let armed = false;
+
+/* Shorthand DOM helper */
+const el = id => document.getElementById(id);
+const logEl = el('log');
+
+/* Append a line to the UI log */
+function log(s){
+  logEl.textContent += s + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* Update connection label */
+function setState(s){ el('state').textContent = s; }
+
+/* Update ARM/DISARM indicator */
+function setArmedUI(a){
+  armed = !!a;
+  el('armedState').textContent = armed ? 'ARMED' : 'DISARMED';
+  el('armedState').className = armed ? 'pill' : 'pill warn';
+}
+
+/* True only when BLE is fully ready */
+function isGattConnected(){
+  return !!(device && device.gatt && device.gatt.connected && rxChar && txChar);
+}
+
+/* Reset everything after disconnect or error */
+function resetClient(reason){
+  if (reason) log(reason);
+  setState('Disconnected');
+  setArmedUI(false);
+  q.length = 0;
+  busy = false;
+  stopHeartbeat();
+  server = service = rxChar = txChar = null;
+}
+
+/* ============================================================
+   WRITE QUEUE
+   Prevents overlapping BLE writes and coalesces slider spam
+   ============================================================ */
+
+const q = [];
+let busy = false;
+const enc = new TextEncoder();
+
+/* Remove older joint commands so only the newest one is sent */
+function coalesceIfJoint(cmd){
+  const m = /^G(\d+):/.exec(cmd);
+  if (!m) return;
+  const prefix = `G${m[1]}:`;
+  for (let i = q.length - 1; i >= 0; i--){
+    if (typeof q[i] === 'string' && q[i].startsWith(prefix)) q.splice(i, 1);
+  }
+}
+
+/* Low-level BLE write helper */
+async function writeCmd(cmd){
+  const data = enc.encode(cmd);
+  if (rxChar?.properties?.writeWithoutResponse && rxChar.writeValueWithoutResponse){
+    await rxChar.writeValueWithoutResponse(data);
+  } else {
+    await rxChar.writeValue(data);
+  }
+}
+
+/* Drain the queue safely */
+async function pump(){
+  if (busy) return;
+  busy = true;
+  try{
+    while (q.length){
+      if (!isGattConnected()) break;
+      const cmd = q.shift();
+      try{
+        await writeCmd(cmd);
+        if (cmd !== 'HB') log('RX<= ' + cmd);
+      } catch (e){
+        const msg = String(e?.message || e);
+        log('ERR write: ' + msg);
+        if (msg.includes('already in progress')){
+          q.unshift(cmd);
+          await new Promise(r => setTimeout(r, 40));
+          continue;
+        }
+        break;
+      }
+      await new Promise(r => setTimeout(r, 3));
+    }
+  } finally {
+    busy = false;
+  }
+}
+
+/* Public send function */
+function sendQueued(cmd){
+  if (!isGattConnected()){
+    log('Not connected');
+    return;
+  }
+  coalesceIfJoint(cmd);
+  q.push(cmd);
+  pump();
+}
+
+/* ============================================================
+   Slider debouncing
+   ============================================================ */
+
+const timers = new Map();
+function debouncedSend(key, builder){
+  const ms = +el('rate').value || 160;
+  const prev = timers.get(key);
+  if (prev) clearTimeout(prev);
+  timers.set(key, setTimeout(() => {
+    const cmd = builder();
+    if (cmd) sendQueued(cmd);
+  }, ms));
+}
+
+/* ============================================================
+   Heartbeat
+   Keeps ESP alive while idle and armed
+   ============================================================ */
+
+let hbTimer = null;
+function startHeartbeat(){
+  stopHeartbeat();
+  hbTimer = setInterval(() => {
+    if (!isGattConnected()) return;
+    if (!armed) return;
+    if (busy || q.length > 0) return;
+    q.push('HB');
+    pump();
+  }, 650);
+}
+
+function stopHeartbeat(){
+  if (hbTimer) clearInterval(hbTimer);
+  hbTimer = null;
+}
+
+/* ============================================================
+   Connection handling
+   ============================================================ */
+
+async function connect(){
+  if (connecting) return;
+  connecting = true;
+  try{
+    if (!navigator.bluetooth){
+      log('Web Bluetooth not available in this browser.');
+      return;
+    }
+
+    if (!device){
+      device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [SERVICE_UUID],
+      });
+      device.addEventListener('gattserverdisconnected',
+        () => resetClient('BLE disconnected'));
+    }
+
+    setState('Connecting...');
+    server = await device.gatt.connect();
+    service = await server.getPrimaryService(SERVICE_UUID);
+    rxChar  = await service.getCharacteristic(RX_UUID);
+    txChar  = await service.getCharacteristic(TX_UUID);
+
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', ev => {
+      const v = new TextDecoder().decode(ev.target.value).trim();
+      if (!v) return;
+      log('TX: ' + v);
+      if (v === 'ARMED'){ setArmedUI(true); startHeartbeat(); }
+      if (v === 'DISARMED'){ setArmedUI(false); stopHeartbeat(); }
+    });
+
+    setState('Connected');
+    log('Connected');
+    sendQueued('STATUS');
+  } catch (e){
+    resetClient('ERR connect: ' + (e?.message || e));
+  } finally {
+    connecting = false;
+  }
+}
+
+function disconnect(){
+  try{ if (device?.gatt?.connected) device.gatt.disconnect(); }catch(_){}
+  resetClient('Disconnected');
+}
+
+/* ============================================================
+   Dynamic joint UI generation
+   ============================================================ */
+
+const wrap = el('joints');
+for (let i=0; i<JOINTS.length; i++){
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <h3>${i} — ${JOINTS[i]}</h3>
+    <div class="row">
+      <label>Degrees</label>
+      <input id="rng${i}" type="range" min="0" max="180" value="90">
+      <span id="val${i}">90</span>
+    </div>
+    <div class="row">
+      <button id="l${i}" class="btn">0°</button>
+      <button id="c${i}" class="btn">90°</button>
+      <button id="r${i}" class="btn">180°</button>
+      <button id="u${i}" class="btn">+Jog</button>
+      <button id="d${i}" class="btn">-Jog</button>
+    </div>`;
+  wrap.appendChild(card);
+
+  const rng = card.querySelector('#rng'+i);
+  const val = card.querySelector('#val'+i);
+
+  rng.addEventListener('input', () => {
+    val.textContent = rng.value;
+    debouncedSend('J'+i, () => `G${i}:${rng.value}`);
+  });
+
+  card.querySelector('#l'+i).onclick = () => sendQueued(`G${i}:0`);
+  card.querySelector('#c'+i).onclick = () => sendQueued(`G${i}:90`);
+  card.querySelector('#r'+i).onclick = () => sendQueued(`G${i}:180`);
+  card.querySelector('#u'+i).onclick = () => sendQueued(`S${i}U`);
+  card.querySelector('#d'+i).onclick = () => sendQueued(`S${i}D`);
+}
+
+/* ============================================================
+   Button wiring
+   ============================================================ */
+
+el('btnConnect').onclick    = connect;
+el('btnDisconnect').onclick = disconnect;
+el('btnHelp').onclick       = () => sendQueued('HELP');
+el('btnArm').onclick        = () => sendQueued('ARM');
+el('btnDisarm').onclick     = () => sendQueued('DISARM');
+el('btnAbort').onclick      = () => sendQueued('ABORT');
+el('btnCenter').onclick     = () => sendQueued('CA');
+
+el('btnRec').onclick        = () => sendQueued('REC1');
+el('btnRecStop').onclick    = () => sendQueued('REC0');
+el('btnPlayF').onclick      = () => sendQueued('PF');
+el('btnPlayR').onclick      = () => sendQueued('PR');
+
+el('btnRecInt').onclick     = () => {
+  let ms = +el('recInt').value || 150;
+  ms = Math.max(50, Math.min(1000, ms));
+  el('recInt').value = ms;
+  sendQueued('RCI' + ms);
+};
+
+el('speed').oninput         = () => el('speedVal').textContent = el('speed').value;
+el('btnSpeed').onclick      = () => sendQueued('VU' + el('speed').value);
+
+el('jogdeg').oninput        = () => el('jogVal').textContent = el('jogdeg').value;
+el('btnJog').onclick        = () => sendQueued('JSD' + el('jogdeg').value);
+
+el('rate').oninput          = () => el('rateVal').textContent = el('rate').value;
+
+el('btnStatus').onclick     = () => sendQueued('STATUS');
+el('btnExport').onclick     = () => sendQueued('EXPORT');
+el('btnClearLog').onclick   = () => { logEl.textContent=''; };
+
+setState('Disconnected');
+setArmedUI(false);
+log('Serve over http://localhost/... (Web Bluetooth requires HTTPS/localhost).');
+</script>
