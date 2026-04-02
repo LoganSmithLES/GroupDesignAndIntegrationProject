@@ -3,4 +3,4 @@ This repository contains the code for an ESP32-based robotic arm system develope
 
 The software supports teleoperation, waypoint teaching, routine playback, heartbeat-based connection monitoring, servo disarming on communication timeout, and smooth motion control to reduce mechanical stress during operation. It was built as part of a minimum viable laboratory automation prototype intended to demonstrate safe, repeatable, and user-teachable robotic manipulation.
 
-THIS PROJECT IS NOW RETIRED
+THIS PROJECT IS NOW RETIRED [Final Score: 88%]
